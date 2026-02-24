@@ -247,14 +247,6 @@
     background: var(--border);
   }
 
-  .toolbar button.export-btn {
-    width: auto;
-    padding: 0 8px;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-  }
-
   .toolbar .help-btn {
     position: relative;
     font-size: 13px;
@@ -377,7 +369,8 @@
 <header>
   <h1>Mermaid Interactive Viewer</h1>
   <div class="header-actions">
-    <button id="btn-share">Share</button>
+    <button id="btn-share" style="display:none">Share</button>
+    <button id="btn-export-svg" style="display:none">Export SVG</button>
     <button id="btn-render" class="primary">Render &#x25B6;</button>
   </div>
 </header>
@@ -402,8 +395,6 @@
       <button id="btn-zoomout" title="Zoom out">&minus;</button>
       <button id="btn-fit" title="Fit to view">&#x2922;</button>
       <button id="btn-fullscreen" title="Fullscreen">&#x26F6;</button>
-      <div class="sep"></div>
-      <button id="btn-export-svg" class="export-btn" title="Export as SVG">SVG</button>
       <div class="sep"></div>
       <button class="help-btn" aria-label="Help">?<span class="tip">Click a node to see everything it&#x2019;s connected to</span></button>
     </div>
@@ -440,6 +431,8 @@
   const editorPane = document.getElementById("editor-pane");
   const resizeHandle = document.getElementById("resize-handle");
   const editorToggle = document.getElementById("editor-toggle");
+  const shareBtn = document.getElementById("btn-share");
+  const exportSvgBtn = document.getElementById("btn-export-svg");
 
   // ── Share / load via URL hash ──
 
@@ -464,7 +457,6 @@
     } catch { return false; }
   }
 
-  const shareBtn = document.getElementById("btn-share");
   shareBtn.addEventListener("click", () => {
     const src = inputEl.value.trim();
     if (!src) return;
@@ -533,6 +525,8 @@
       containerEl.innerHTML = svg;
       placeholderEl.style.display = "none";
       toolbarEl.style.display = "flex";
+      shareBtn.style.display = "";
+      exportSvgBtn.style.display = "";
 
       const svgEl = containerEl.querySelector("svg");
       svgEl.removeAttribute("style");
@@ -1048,7 +1042,7 @@
     downloadBlob(blob, "diagram.svg");
   }
 
-  document.getElementById("btn-export-svg").addEventListener("click", exportSvg);
+  exportSvgBtn.addEventListener("click", exportSvg);
 
   // ═══════════════════════════════════════
   //  EDITOR COLLAPSE TOGGLE
