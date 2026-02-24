@@ -1019,7 +1019,7 @@
   //  EDITOR COLLAPSE TOGGLE
   // ═══════════════════════════════════════
 
-  let editorCollapsed = VIEWER_CONFIG.editorCollapsed;
+  let editorCollapsed = loadedFromHash || VIEWER_CONFIG.editorCollapsed;
   let savedEditorHeight = editorPane.style.height || "200px";
   if (editorCollapsed) {
     editorPane.classList.add("collapsed");
