@@ -1,0 +1,1101 @@
+<!--
+  Mermaid Interactive Viewer — a self-contained single-page app for editing,
+  rendering, and exploring Mermaid flowchart diagrams.
+
+  Features:
+    - Collapsible code editor with syntax-friendly input (Tab indentation, Ctrl/Cmd+Enter to render)
+    - Renders diagrams via Mermaid.js v11 with the ELK layout engine
+    - Pan and zoom (svg-pan-zoom) with toolbar controls, fit-to-view, and fullscreen
+    - Click any node to highlight its full upstream and downstream dependency graph
+      (BFS traversal); unrelated nodes and edges are dimmed
+    - Shareable URLs — diagram source is base64-encoded into the URL hash
+    - SVG export of the rendered diagram
+    - Resizable split between editor and diagram panes via drag handle
+    - Error banner for parse/render failures with a loading spinner during render
+
+  Dependencies (loaded from CDN):
+    - mermaid 11.x (ESM)
+    - @mermaid-js/layout-elk 0.x (ESM)
+    - svg-pan-zoom 3.6.x
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mermaid Interactive Viewer</title>
+<script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #f5f5f5;
+    --surface: #ffffff;
+    --border: #d4d4d8;
+    --text: #1e1e2e;
+    --text-dim: #71717a;
+    --accent: #2563eb;
+    --accent-glow: rgba(37, 99, 235, 0.3);
+    --btn-bg: #e4e4e7;
+    --btn-hover: #d4d4d8;
+    --editor-bg: #ffffff;
+    --toolbar-bg: rgba(255, 255, 255, 0.9);
+  }
+
+  html, body { height: 100%; overflow: hidden; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 12px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  header h1 {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--accent);
+  }
+
+  .header-actions { display: flex; gap: 8px; align-items: center; }
+
+  button {
+    font-family: inherit;
+    font-size: 12px;
+    padding: 3px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--btn-bg);
+    color: var(--text);
+    cursor: pointer;
+    transition: background 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  button:hover { background: var(--btn-hover); }
+
+  button.primary {
+    background: var(--accent);
+    color: #ffffff;
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+
+  button.primary:hover { filter: brightness(1.1); }
+
+  button.copied {
+    background: #16a34a;
+    color: #fff;
+    border-color: #16a34a;
+    pointer-events: none;
+  }
+
+  /* ── Main split ── */
+  .split {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .editor-pane {
+    height: 200px;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--editor-bg);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    transition: height 0.25s ease;
+  }
+
+  .editor-pane.collapsed {
+    height: auto !important;
+  }
+
+  .editor-pane.collapsed textarea { display: none; }
+
+  .editor-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 12px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .editor-toggle:hover { color: var(--text); }
+
+  .editor-toggle .chevron {
+    transition: transform 0.25s ease;
+    font-size: 8px;
+  }
+
+  .editor-pane.collapsed .editor-toggle .chevron {
+    transform: rotate(-90deg);
+  }
+
+  .resize-handle {
+    height: 5px;
+    cursor: row-resize;
+    background: var(--border);
+    flex-shrink: 0;
+    transition: background 0.15s;
+  }
+
+  .editor-pane.collapsed + .resize-handle { display: none; }
+
+  .resize-handle:hover, .resize-handle.active { background: var(--accent); }
+
+  textarea {
+    flex: 1;
+    resize: none;
+    border: none;
+    outline: none;
+    padding: 12px 16px;
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    background: var(--editor-bg);
+    color: var(--text);
+    tab-size: 2;
+  }
+
+  textarea::placeholder { color: var(--text-dim); }
+
+  /* ── Diagram pane ── */
+  .diagram-pane {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    background: #fafafa;
+    min-height: 0;
+  }
+
+  #diagram-container {
+    width: 100%;
+    height: 100%;
+  }
+
+  #diagram-container svg {
+    width: 100%;
+    height: 100%;
+  }
+
+  .placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 14px;
+    pointer-events: none;
+  }
+
+  /* ── Toolbar ── */
+  .toolbar {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    display: flex;
+    gap: 4px;
+    background: var(--toolbar-bg);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px;
+    z-index: 10;
+  }
+
+  .toolbar button {
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    border: none;
+    border-radius: 6px;
+  }
+
+  .toolbar .sep {
+    width: 1px;
+    align-self: stretch;
+    margin: 4px 2px;
+    background: var(--border);
+  }
+
+  .toolbar button.export-btn {
+    width: auto;
+    padding: 0 8px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  /* ── Highlight states ── */
+  .diagram-pane.has-highlight .node,
+  .diagram-pane.has-highlight .edgePath,
+  .diagram-pane.has-highlight .edgeLabel,
+  .diagram-pane.has-highlight .flowchart-link,
+  .diagram-pane.has-highlight .cluster {
+    opacity: 0.56;
+    transition: opacity 0.25s ease;
+  }
+
+  .diagram-pane.has-highlight .node.hl,
+  .diagram-pane.has-highlight .edgePath.hl,
+  .diagram-pane.has-highlight .edgeLabel.hl,
+  .diagram-pane.has-highlight .flowchart-link.hl,
+  .diagram-pane.has-highlight .cluster.hl {
+    opacity: 1;
+    transition: opacity 0.25s ease;
+  }
+
+  .diagram-pane.has-highlight .node.hl-source rect,
+  .diagram-pane.has-highlight .node.hl-source polygon,
+  .diagram-pane.has-highlight .node.hl-source circle,
+  .diagram-pane.has-highlight .node.hl-source .label-container {
+    filter: drop-shadow(0 0 6px var(--accent-glow));
+  }
+
+  .diagram-pane.has-highlight .edgePath.hl path,
+  .diagram-pane.has-highlight .flowchart-link.hl {
+    stroke: var(--accent) !important;
+    stroke-width: 2.5px !important;
+  }
+
+  .diagram-pane.has-highlight .edgeLabel.hl .edgeLabel {
+    font-weight: 700;
+  }
+
+  .node { cursor: pointer; }
+
+  /* ── Fullscreen ── */
+  .diagram-pane:fullscreen {
+    background: #fafafa;
+  }
+
+  /* ── Error display ── */
+  .error-banner {
+    display: none;
+    padding: 8px 16px;
+    background: #fef2f2;
+    color: #dc2626;
+    font-size: 13px;
+    border-bottom: 1px solid #fecaca;
+    flex-shrink: 0;
+  }
+
+  .error-banner.visible { display: block; }
+
+  /* ── Spinner ── */
+  .spinner-overlay {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(245, 245, 245, 0.6);
+    z-index: 20;
+    pointer-events: none;
+  }
+
+  .spinner-overlay.visible { display: flex; }
+
+  .spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Mermaid Interactive Viewer</h1>
+  <div class="header-actions">
+    <button id="btn-share">Share</button>
+    <button id="btn-render" class="primary">Render &#x25B6;</button>
+  </div>
+</header>
+
+<div class="error-banner" id="error-banner"></div>
+
+<div class="split">
+  <div class="editor-pane" id="editor-pane">
+    <div class="editor-toggle" id="editor-toggle">
+      <span>Diagram Source</span>
+      <span class="chevron">&#x25BC;</span>
+    </div>
+    <textarea id="mermaid-input" placeholder="Paste your Mermaid flowchart definition here..." spellcheck="false"></textarea>
+  </div>
+  <div class="resize-handle" id="resize-handle"></div>
+  <div class="diagram-pane" id="diagram-pane">
+    <div id="diagram-container"></div>
+    <div class="placeholder" id="placeholder">Press Render or Ctrl+Enter to visualize</div>
+    <div class="spinner-overlay" id="spinner"><div class="spinner"></div></div>
+    <div class="toolbar" id="toolbar" style="display:none;">
+      <button id="btn-zoomin" title="Zoom in">+</button>
+      <button id="btn-zoomout" title="Zoom out">&minus;</button>
+      <button id="btn-fit" title="Fit to view">&#x2922;</button>
+      <button id="btn-fullscreen" title="Fullscreen">&#x26F6;</button>
+      <div class="sep"></div>
+      <button id="btn-export-svg" class="export-btn" title="Export as SVG">SVG</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  import elkLayouts from "https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0/dist/mermaid-layout-elk.esm.min.mjs";
+
+  mermaid.registerLayoutLoaders(elkLayouts);
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: "default",
+    securityLevel: "loose",
+    layout: "elk",
+  });
+
+  const VIEWER_CONFIG = {
+    initialDiagram: "",
+    editorCollapsed: false,
+  };
+
+(function () {
+  "use strict";
+
+  const inputEl = document.getElementById("mermaid-input");
+  const containerEl = document.getElementById("diagram-container");
+  const diagramPane = document.getElementById("diagram-pane");
+  const placeholderEl = document.getElementById("placeholder");
+  const toolbarEl = document.getElementById("toolbar");
+  const errorBanner = document.getElementById("error-banner");
+  const spinnerEl = document.getElementById("spinner");
+  const editorPane = document.getElementById("editor-pane");
+  const resizeHandle = document.getElementById("resize-handle");
+  const editorToggle = document.getElementById("editor-toggle");
+
+  // ── Share / load via URL hash ──
+
+  function toBase64(str) {
+    return btoa(String.fromCharCode(...new TextEncoder().encode(str)))
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  function fromBase64(b64) {
+    const padded = b64.replace(/-/g, "+").replace(/_/g, "/") +
+      "=".repeat((4 - (b64.length % 4)) % 4);
+    const bytes = Uint8Array.from(atob(padded), c => c.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  }
+
+  function loadFromHash() {
+    const hash = location.hash.slice(1);
+    if (!hash.startsWith("code=")) return false;
+    try {
+      inputEl.value = fromBase64(hash.slice(5));
+      return true;
+    } catch { return false; }
+  }
+
+  const shareBtn = document.getElementById("btn-share");
+  shareBtn.addEventListener("click", () => {
+    const src = inputEl.value.trim();
+    if (!src) return;
+    const encoded = toBase64(src);
+    const url = location.origin + location.pathname + "#code=" + encoded;
+    history.replaceState(null, "", "#code=" + encoded);
+    navigator.clipboard.writeText(url).then(() => {
+      shareBtn.textContent = "Copied!";
+      shareBtn.classList.add("copied");
+      setTimeout(() => {
+        shareBtn.textContent = "Share";
+        shareBtn.classList.remove("copied");
+      }, 1500);
+    });
+  });
+
+  const loadedFromHash = loadFromHash();
+
+  if (!loadedFromHash && VIEWER_CONFIG.initialDiagram) {
+    inputEl.value = VIEWER_CONFIG.initialDiagram;
+  }
+
+  let panZoomInstance = null;
+  let renderCounter = 0;
+
+  // ── State for highlighting ──
+  let parsedEdges = [];       // [{source, target}, ...]
+  let downstream = new Map(); // nodeId -> Set<nodeId>  (forward: with arrows)
+  let upstream = new Map();   // nodeId -> Set<nodeId>  (reverse: against arrows)
+  let svgNodeMap = new Map(); // nodeId -> SVG <g> element
+  let svgEdgeList = [];       // SVG <g> edgePath elements in source order
+  let svgEdgeLabelList = [];  // SVG <g> edgeLabel elements in source order
+  let svgLinkList = [];       // SVG <path> flowchart-link elements in source order
+  let activeHighlight = null; // currently highlighted nodeId or null
+
+  // ═══════════════════════════════════════
+  //  RENDERING
+  // ═══════════════════════════════════════
+
+  async function renderDiagram() {
+    const src = inputEl.value.trim();
+    if (!src) return;
+
+    hideError();
+    activeHighlight = null;
+    diagramPane.classList.remove("has-highlight");
+
+    if (panZoomInstance) {
+      panZoomInstance.destroy();
+      panZoomInstance = null;
+    }
+
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: "default",
+      securityLevel: "loose",
+      layout: "elk",
+    });
+
+    spinnerEl.classList.add("visible");
+    renderCounter++;
+    const id = "mermaid-graph-" + renderCounter;
+
+    try {
+      const { svg } = await mermaid.render(id, src);
+      containerEl.innerHTML = svg;
+      placeholderEl.style.display = "none";
+      toolbarEl.style.display = "flex";
+
+      const svgEl = containerEl.querySelector("svg");
+      svgEl.removeAttribute("style");
+      svgEl.setAttribute("width", "100%");
+      svgEl.setAttribute("height", "100%");
+
+      panZoomInstance = svgPanZoom(svgEl, {
+        zoomEnabled: true,
+        panEnabled: true,
+        controlIconsEnabled: false,
+        fit: true,
+        center: true,
+        minZoom: 0.1,
+        maxZoom: 40,
+        zoomScaleSensitivity: 0.3,
+      });
+
+      buildGraphModel(src);
+      mapSvgElements(svgEl);
+      attachNodeClickHandlers(svgEl);
+
+    } catch (err) {
+      showError(err.message || String(err));
+
+      const badEl = document.getElementById("d" + id);
+      if (badEl) badEl.remove();
+    } finally {
+      spinnerEl.classList.remove("visible");
+    }
+  }
+
+  function showError(msg) {
+    errorBanner.textContent = msg;
+    errorBanner.classList.add("visible");
+  }
+
+  function hideError() {
+    errorBanner.textContent = "";
+    errorBanner.classList.remove("visible");
+  }
+
+  // ═══════════════════════════════════════
+  //  MERMAID TEXT PARSER  (edge extraction)
+  // ═══════════════════════════════════════
+
+  function buildGraphModel(src) {
+    parsedEdges = [];
+    downstream = new Map();
+    upstream = new Map();
+
+    const lines = src.split("\n");
+    const skipPrefixes = [
+      "%%", "style", "classdef", "class ", "click", "linkstyle", "direction",
+    ];
+
+    const subgraphMembers = new Map();
+    const subgraphStack = [];
+    const subgraphLines = new Map();
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("%%")) continue;
+      const lower = line.toLowerCase();
+
+      if (lower.startsWith("subgraph")) {
+        const sgMatch = line.match(/^subgraph\s+(\S+)/i);
+        if (sgMatch) {
+          const sgId = sgMatch[1];
+          subgraphStack.push(sgId);
+          if (!subgraphMembers.has(sgId)) subgraphMembers.set(sgId, new Set());
+        }
+        continue;
+      }
+
+      if (lower === "end") {
+        if (subgraphStack.length) subgraphStack.pop();
+        continue;
+      }
+
+      if (skipPrefixes.some((p) => lower.startsWith(p))) continue;
+
+      extractEdgesFromLine(line);
+
+      for (const sgId of subgraphStack) {
+        if (!subgraphLines.has(sgId)) subgraphLines.set(sgId, []);
+        subgraphLines.get(sgId).push(line);
+      }
+    }
+
+    const allEdgeNodes = new Set();
+    for (const edge of parsedEdges) {
+      allEdgeNodes.add(edge.source);
+      allEdgeNodes.add(edge.target);
+    }
+
+    const kw = new Set(["flowchart", "graph", "subgraph", "end", "style", "classDef", "class",
+                         "click", "linkStyle", "direction", "TD", "TB", "BT", "RL", "LR"]);
+
+    for (const [sgId, sgLines] of subgraphLines) {
+      if (!subgraphMembers.has(sgId)) continue;
+      for (const line of sgLines) {
+        const firstWord = line.match(/^([a-zA-Z_][a-zA-Z0-9_-]*)/);
+        if (firstWord && !kw.has(firstWord[1]) && allEdgeNodes.has(firstWord[1])) {
+          subgraphMembers.get(sgId).add(firstWord[1]);
+        }
+        const tokens = tokenizeLine(line);
+        if (tokens) {
+          for (const id of tokens) {
+            if (!kw.has(id) && allEdgeNodes.has(id)) {
+              subgraphMembers.get(sgId).add(id);
+            }
+          }
+        }
+      }
+    }
+
+    for (const [sgId, members] of subgraphMembers) {
+      if (members.size === 0) continue;
+      const sgIsSource = parsedEdges.some(e => e.source === sgId);
+      const sgIsTarget = parsedEdges.some(e => e.target === sgId);
+
+      if (sgIsSource) {
+        for (const nodeId of members) {
+          if (!downstream.has(nodeId)) downstream.set(nodeId, new Set());
+          if (!upstream.has(sgId)) upstream.set(sgId, new Set());
+          downstream.get(nodeId).add(sgId);
+          upstream.get(sgId).add(nodeId);
+        }
+      }
+
+      if (sgIsTarget) {
+        for (const nodeId of members) {
+          if (!downstream.has(sgId)) downstream.set(sgId, new Set());
+          if (!upstream.has(nodeId)) upstream.set(nodeId, new Set());
+          downstream.get(sgId).add(nodeId);
+          upstream.get(nodeId).add(sgId);
+        }
+      }
+    }
+  }
+
+  function extractEdgesFromLine(line) {
+    // Tokenize: pull out node ids and arrows.
+    // Strategy: repeatedly match (nodeId)(possible node shape/label)(arrow with optional label)(nodeId)...
+    // We handle chains like A --> B --> C by iterating.
+
+    // Strip inline comments
+    line = line.replace(/%%.*$/, "").trim();
+    if (!line) return;
+
+    const tokens = tokenizeLine(line);
+    if (!tokens || tokens.length < 2) return;
+
+    for (let i = 0; i < tokens.length - 1; i++) {
+      const src = tokens[i];
+      const tgt = tokens[i + 1];
+      if (src && tgt) {
+        parsedEdges.push({ source: src, target: tgt });
+        if (!downstream.has(src)) downstream.set(src, new Set());
+        if (!downstream.has(tgt)) downstream.set(tgt, new Set());
+        if (!upstream.has(src)) upstream.set(src, new Set());
+        if (!upstream.has(tgt)) upstream.set(tgt, new Set());
+        downstream.get(src).add(tgt);
+        upstream.get(tgt).add(src);
+      }
+    }
+  }
+
+  function tokenizeLine(line) {
+    // Returns an ordered list of node IDs found on a line with edge connections.
+    const nodes = [];
+    let pos = 0;
+    const len = line.length;
+
+    while (pos < len) {
+      skipWhitespace();
+
+      // Try to read a node ID
+      const nodeId = readNodeId();
+      if (nodeId !== null) {
+        nodes.push(nodeId);
+        skipNodeShape();
+        skipWhitespace();
+
+        // After a node+shape, expect an arrow or end-of-line
+        if (pos < len && !trySkipArrow()) {
+          // If no arrow follows, we're done with this chain (could be a lone node def)
+          if (nodes.length < 2) { nodes.length = 0; }
+          break;
+        }
+        continue;
+      }
+
+      // If we can't read a node here, try skipping an arrow (for leading arrows, shouldn't happen)
+      if (!trySkipArrow()) break;
+    }
+
+    return nodes;
+
+    function skipWhitespace() {
+      while (pos < len && (line[pos] === " " || line[pos] === "\t")) pos++;
+    }
+
+    function readNodeId() {
+      const m = line.slice(pos).match(/^([a-zA-Z_][a-zA-Z0-9_-]*)/);
+      if (!m) return null;
+      // Exclude mermaid keywords
+      const kw = ["flowchart", "graph", "subgraph", "end", "style", "classDef", "class", "click",
+                   "linkStyle", "direction", "TD", "TB", "BT", "RL", "LR"];
+      if (kw.includes(m[1])) { pos += m[1].length; return null; }
+      pos += m[1].length;
+      return m[1];
+    }
+
+    function skipNodeShape() {
+      skipWhitespace();
+      if (pos >= len) return;
+      const openers = { "[": "]", "(": ")", "{": "}" };
+      // Handle doubled openers like [[ ]], (( )), etc.
+      const c = line[pos];
+      if (!(c in openers)) return;
+
+      let depth = 0;
+      const closer = openers[c];
+      while (pos < len) {
+        if (line[pos] === c && c !== closer) depth++;
+        else if (line[pos] === closer) {
+          depth--;
+          if (depth <= 0) { pos++; break; }
+        }
+        pos++;
+      }
+      // Handle doubled closers like ]]
+      while (pos < len && line[pos] === closer) pos++;
+    }
+
+    function trySkipArrow() {
+      // Arrows: combinations of -, =, . with >, and optional |label| or "label"
+      // Examples: -->, --->, -.->,-..-> , ==>, -- text -->, -->|text|, ---|text|
+      const slice = line.slice(pos);
+      // Try labeled arrow first: -- text -->
+      const labeledArrow = slice.match(/^\s*(?:--+|==+|-\.+-?)\s+[^-=.>|]*?(?:--+>|==+>|-\.+->)\s*/);
+      if (labeledArrow) {
+        pos += labeledArrow[0].length;
+        return true;
+      }
+      // Try arrow with pipe label: -->|text|
+      const pipeLabelArrow = slice.match(/^\s*(?:--+>|==+>|-\.+->|--+|==+|-\.+-?)(?:\|[^|]*\|)\s*/);
+      if (pipeLabelArrow) {
+        pos += pipeLabelArrow[0].length;
+        return true;
+      }
+      // Simple arrow: -->, --->, ==>, -.->
+      const simple = slice.match(/^\s*(?:--+>|==+>|-\.+->)\s*/);
+      if (simple) {
+        pos += simple[0].length;
+        return true;
+      }
+      // Non-directional links: ---, ===, -.-
+      const link = slice.match(/^\s*(?:-{2,}|={2,}|-\.+-?)\s*/);
+      if (link) {
+        pos += link[0].length;
+        return true;
+      }
+      return false;
+    }
+  }
+
+  // ═══════════════════════════════════════
+  //  SVG ELEMENT MAPPING
+  // ═══════════════════════════════════════
+
+  function mapSvgElements(svgEl) {
+    svgNodeMap = new Map();
+    svgEdgeList = [];
+    svgEdgeLabelList = [];
+    svgLinkList = [];
+
+    // Nodes: mermaid gives them ids like "flowchart-<nodeId>-<n>" or just includes the id in data-id
+    const nodeEls = svgEl.querySelectorAll(".node");
+    for (const el of nodeEls) {
+      const elId = el.id || "";
+      // Extract node ID from the element id: "flowchart-A-0" -> "A"
+      const match = elId.match(/^flowchart-(.+?)-\d+$/);
+      if (match) {
+        svgNodeMap.set(match[1], el);
+      } else {
+        // Fallback: try data-id attribute or the id itself
+        const dataId = el.getAttribute("data-id");
+        if (dataId) {
+          svgNodeMap.set(dataId, el);
+        } else if (elId) {
+          svgNodeMap.set(elId, el);
+        }
+      }
+    }
+
+    // Edge paths and labels (in source order)
+    svgEdgeList = Array.from(svgEl.querySelectorAll(".edgePath"));
+    svgEdgeLabelList = Array.from(svgEl.querySelectorAll(".edgeLabel"));
+    svgLinkList = Array.from(svgEl.querySelectorAll(".flowchart-link"));
+  }
+
+  // ═══════════════════════════════════════
+  //  HIGHLIGHTING
+  // ═══════════════════════════════════════
+
+  function attachNodeClickHandlers(svgEl) {
+    // Click on nodes
+    const nodeEls = svgEl.querySelectorAll(".node");
+    for (const el of nodeEls) {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const nodeId = nodeIdFromElement(el);
+        if (!nodeId) return;
+
+        if (activeHighlight === nodeId) {
+          clearHighlight();
+        } else {
+          highlightNode(nodeId);
+        }
+      });
+    }
+
+    // Click on background clears
+    svgEl.addEventListener("click", (e) => {
+      if (e.target === svgEl || e.target.tagName === "rect" && e.target.parentElement === svgEl) {
+        clearHighlight();
+      }
+    });
+
+    // Also clear when clicking the container background
+    diagramPane.addEventListener("click", (e) => {
+      if (e.target === diagramPane || e.target === containerEl) {
+        clearHighlight();
+      }
+    });
+  }
+
+  function nodeIdFromElement(el) {
+    const elId = el.id || "";
+    const match = elId.match(/^flowchart-(.+?)-\d+$/);
+    if (match) return match[1];
+    return el.getAttribute("data-id") || elId || null;
+  }
+
+  function highlightNode(nodeId) {
+    activeHighlight = nodeId;
+
+    // BFS downstream (with arrows) and upstream (against arrows) separately
+    const connectedNodes = new Set([nodeId]);
+    const downQueue = [nodeId];
+    while (downQueue.length) {
+      const current = downQueue.shift();
+      for (const nb of downstream.get(current) || []) {
+        if (!connectedNodes.has(nb)) {
+          connectedNodes.add(nb);
+          downQueue.push(nb);
+        }
+      }
+    }
+    const upQueue = [nodeId];
+    while (upQueue.length) {
+      const current = upQueue.shift();
+      for (const nb of upstream.get(current) || []) {
+        if (!connectedNodes.has(nb)) {
+          connectedNodes.add(nb);
+          upQueue.push(nb);
+        }
+      }
+    }
+
+    // Highlight edges where both endpoints are in the connected component
+    const connectedEdgeIndices = new Set();
+    for (let i = 0; i < parsedEdges.length; i++) {
+      const e = parsedEdges[i];
+      if (connectedNodes.has(e.source) && connectedNodes.has(e.target)) {
+        connectedEdgeIndices.add(i);
+      }
+    }
+
+    // Apply classes to nodes
+    for (const [nid, el] of svgNodeMap) {
+      el.classList.remove("hl", "hl-source");
+      if (connectedNodes.has(nid)) {
+        el.classList.add("hl");
+        if (nid === nodeId) el.classList.add("hl-source");
+      }
+    }
+
+    // Apply classes to edges
+    for (let i = 0; i < svgEdgeList.length; i++) {
+      svgEdgeList[i].classList.remove("hl");
+      if (connectedEdgeIndices.has(i)) {
+        svgEdgeList[i].classList.add("hl");
+      }
+    }
+
+    // Apply classes to edge labels
+    for (let i = 0; i < svgEdgeLabelList.length; i++) {
+      svgEdgeLabelList[i].classList.remove("hl");
+      if (connectedEdgeIndices.has(i)) {
+        svgEdgeLabelList[i].classList.add("hl");
+      }
+    }
+
+    // Apply classes to flowchart-link paths
+    for (let i = 0; i < svgLinkList.length; i++) {
+      svgLinkList[i].classList.remove("hl");
+      if (connectedEdgeIndices.has(i)) {
+        svgLinkList[i].classList.add("hl");
+      }
+    }
+
+    diagramPane.classList.add("has-highlight");
+  }
+
+  function clearHighlight() {
+    activeHighlight = null;
+    diagramPane.classList.remove("has-highlight");
+
+    for (const [, el] of svgNodeMap) {
+      el.classList.remove("hl", "hl-source");
+    }
+    for (const el of svgEdgeList) {
+      el.classList.remove("hl");
+    }
+    for (const el of svgEdgeLabelList) {
+      el.classList.remove("hl");
+    }
+    for (const el of svgLinkList) {
+      el.classList.remove("hl");
+    }
+  }
+
+  // ═══════════════════════════════════════
+  //  TOOLBAR: ZOOM / PAN / FULLSCREEN
+  // ═══════════════════════════════════════
+
+  document.getElementById("btn-zoomin").addEventListener("click", () => {
+    if (panZoomInstance) panZoomInstance.zoomIn();
+  });
+
+  document.getElementById("btn-zoomout").addEventListener("click", () => {
+    if (panZoomInstance) panZoomInstance.zoomOut();
+  });
+
+  document.getElementById("btn-fit").addEventListener("click", () => {
+    if (panZoomInstance) { panZoomInstance.resetZoom(); panZoomInstance.resetPan(); panZoomInstance.fit(); panZoomInstance.center(); }
+  });
+
+  document.getElementById("btn-fullscreen").addEventListener("click", () => {
+    if (!document.fullscreenElement) {
+      diagramPane.requestFullscreen().then(() => {
+        setTimeout(() => { if (panZoomInstance) { panZoomInstance.resize(); panZoomInstance.fit(); panZoomInstance.center(); } }, 200);
+      }).catch(() => {});
+    } else {
+      document.exitFullscreen();
+    }
+  });
+
+  document.addEventListener("fullscreenchange", () => {
+    setTimeout(() => {
+      if (panZoomInstance) { panZoomInstance.resize(); panZoomInstance.fit(); panZoomInstance.center(); }
+    }, 200);
+  });
+
+  // ═══════════════════════════════════════
+  //  EXPORT (SVG / PNG)
+  // ═══════════════════════════════════════
+
+  let exportCounter = 0;
+
+  async function renderFreshSvg() {
+    const src = inputEl.value.trim();
+    if (!src) return null;
+
+    exportCounter++;
+    const id = "mermaid-export-" + exportCounter;
+
+    const { svg } = await mermaid.render(id, src);
+
+    const tempDiv = document.createElement("div");
+    tempDiv.innerHTML = svg;
+    const svgEl = tempDiv.querySelector("svg");
+    if (!svgEl) return null;
+
+    // Clean up the phantom element mermaid may leave in the DOM
+    const phantom = document.getElementById("d" + id);
+    if (phantom) phantom.remove();
+
+    svgEl.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    svgEl.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+    return svgEl;
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+  }
+
+  async function exportSvg() {
+    const svgEl = await renderFreshSvg();
+    if (!svgEl) return;
+    const serializer = new XMLSerializer();
+    const svgString = '<?xml version="1.0" encoding="UTF-8"?>\n' + serializer.serializeToString(svgEl);
+    const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+    downloadBlob(blob, "diagram.svg");
+  }
+
+  document.getElementById("btn-export-svg").addEventListener("click", exportSvg);
+
+  // ═══════════════════════════════════════
+  //  EDITOR COLLAPSE TOGGLE
+  // ═══════════════════════════════════════
+
+  let editorCollapsed = VIEWER_CONFIG.editorCollapsed;
+  let savedEditorHeight = editorPane.style.height || "200px";
+  if (editorCollapsed) {
+    editorPane.classList.add("collapsed");
+  }
+
+  editorToggle.addEventListener("click", () => {
+    editorCollapsed = !editorCollapsed;
+    if (editorCollapsed) {
+      savedEditorHeight = editorPane.style.height || editorPane.offsetHeight + "px";
+      editorPane.classList.add("collapsed");
+    } else {
+      editorPane.classList.remove("collapsed");
+      editorPane.style.height = savedEditorHeight;
+    }
+    setTimeout(() => {
+      if (panZoomInstance) { panZoomInstance.resize(); panZoomInstance.fit(); panZoomInstance.center(); }
+    }, 300);
+  });
+
+  // ═══════════════════════════════════════
+  //  RESIZE HANDLE
+  // ═══════════════════════════════════════
+
+  let isResizing = false;
+
+  resizeHandle.addEventListener("mousedown", (e) => {
+    isResizing = true;
+    resizeHandle.classList.add("active");
+    e.preventDefault();
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!isResizing) return;
+    const rect = document.querySelector(".split").getBoundingClientRect();
+    let newHeight = e.clientY - rect.top;
+    newHeight = Math.max(80, Math.min(newHeight, rect.height - 100));
+    editorPane.style.height = newHeight + "px";
+    if (panZoomInstance) { panZoomInstance.resize(); panZoomInstance.fit(); panZoomInstance.center(); }
+  });
+
+  document.addEventListener("mouseup", () => {
+    if (isResizing) {
+      isResizing = false;
+      resizeHandle.classList.remove("active");
+    }
+  });
+
+  // ═══════════════════════════════════════
+  //  RENDER TRIGGERS
+  // ═══════════════════════════════════════
+
+  document.getElementById("btn-render").addEventListener("click", renderDiagram);
+
+
+  inputEl.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault();
+      renderDiagram();
+    }
+    // Tab inserts spaces in textarea
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const start = inputEl.selectionStart;
+      const end = inputEl.selectionEnd;
+      inputEl.value = inputEl.value.substring(0, start) + "  " + inputEl.value.substring(end);
+      inputEl.selectionStart = inputEl.selectionEnd = start + 2;
+    }
+  });
+
+
+  // Auto-render on load if there's content
+  if (inputEl.value.trim()) {
+    renderDiagram();
+  }
+
+})();
+  </script>
+</body>
+</html>
