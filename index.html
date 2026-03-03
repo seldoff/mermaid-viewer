@@ -72,6 +72,20 @@
 
   .header-actions { display: flex; gap: 8px; align-items: center; }
 
+  .header-actions select {
+    font-family: inherit;
+    font-size: 12px;
+    padding: 3px 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--btn-bg);
+    color: var(--text);
+    cursor: pointer;
+    outline: none;
+  }
+
+  .header-actions select:hover { background: var(--btn-hover); }
+
   button {
     font-family: inherit;
     font-size: 12px;
@@ -285,6 +299,7 @@
   .diagram-pane.has-highlight .edgePath,
   .diagram-pane.has-highlight .edgeLabel,
   .diagram-pane.has-highlight .flowchart-link,
+  .diagram-pane.has-highlight .transition,
   .diagram-pane.has-highlight .cluster {
     opacity: 0.56;
     transition: opacity 0.25s ease;
@@ -294,6 +309,7 @@
   .diagram-pane.has-highlight .edgePath.hl,
   .diagram-pane.has-highlight .edgeLabel.hl,
   .diagram-pane.has-highlight .flowchart-link.hl,
+  .diagram-pane.has-highlight .transition.hl,
   .diagram-pane.has-highlight .cluster.hl {
     opacity: 1;
     transition: opacity 0.25s ease;
@@ -307,7 +323,8 @@
   }
 
   .diagram-pane.has-highlight .edgePath.hl path,
-  .diagram-pane.has-highlight .flowchart-link.hl {
+  .diagram-pane.has-highlight .flowchart-link.hl,
+  .diagram-pane.has-highlight .transition.hl {
     stroke: var(--accent) !important;
     stroke-width: 2.5px !important;
   }
@@ -369,6 +386,13 @@
 <header>
   <h1>Mermaid Interactive Viewer</h1>
   <div class="header-actions">
+    <label style="font-size:12px;color:var(--text-dim);display:flex;align-items:center;gap:4px;">
+      Layout
+      <select id="layout-select">
+        <option value="elk" selected>ELK</option>
+        <option value="dagre">Dagre</option>
+      </select>
+    </label>
     <button id="btn-share" style="display:none">Share</button>
     <button id="btn-export-svg" style="display:none">Export SVG</button>
     <button id="btn-render" class="primary">Render &#x25B6;</button>
@@ -422,6 +446,7 @@
   "use strict";
 
   const inputEl = document.getElementById("mermaid-input");
+  const layoutSelect = document.getElementById("layout-select");
   const containerEl = document.getElementById("diagram-container");
   const diagramPane = document.getElementById("diagram-pane");
   const placeholderEl = document.getElementById("placeholder");
@@ -486,8 +511,9 @@
   let parsedEdges = [];       // [{source, target}, ...]
   let downstream = new Map(); // nodeId -> Set<nodeId>  (forward: with arrows)
   let upstream = new Map();   // nodeId -> Set<nodeId>  (reverse: against arrows)
+  let allParsedNodeIds = new Set(); // all node IDs from source parsing
   let svgNodeMap = new Map(); // nodeId -> SVG <g> element
-  let svgEdgeList = [];       // SVG <g> edgePath elements in source order
+  let svgEdgeList = [];       // SVG <g> edgePath or <path> transition elements in source order
   let svgEdgeLabelList = [];  // SVG <g> edgeLabel elements in source order
   let svgLinkList = [];       // SVG <path> flowchart-link elements in source order
   let activeHighlight = null; // currently highlighted nodeId or null
@@ -513,7 +539,7 @@
       startOnLoad: false,
       theme: "default",
       securityLevel: "loose",
-      layout: "elk",
+      layout: layoutSelect.value,
     });
 
     spinnerEl.classList.add("visible");
@@ -576,10 +602,11 @@
     parsedEdges = [];
     downstream = new Map();
     upstream = new Map();
+    allParsedNodeIds = new Set();
 
     const lines = src.split("\n");
     const skipPrefixes = [
-      "%%", "style", "classdef", "class ", "click", "linkstyle", "direction",
+      "%%", "style", "classdef", "class ", "click", "linkstyle", "direction", "note",
     ];
 
     const subgraphMembers = new Map();
@@ -666,6 +693,12 @@
         }
       }
     }
+
+    // Build set of all known node IDs from parsed edges
+    for (const edge of parsedEdges) {
+      allParsedNodeIds.add(edge.source);
+      allParsedNodeIds.add(edge.target);
+    }
   }
 
   function extractEdgesFromLine(line) {
@@ -681,8 +714,8 @@
     if (!tokens || tokens.length < 2) return;
 
     for (let i = 0; i < tokens.length - 1; i++) {
-      const src = tokens[i];
-      const tgt = tokens[i + 1];
+      const src = tokens[i] === "[*]" ? "root_start" : tokens[i];
+      const tgt = tokens[i + 1] === "[*]" ? "root_end" : tokens[i + 1];
       if (src && tgt) {
         parsedEdges.push({ source: src, target: tgt });
         if (!downstream.has(src)) downstream.set(src, new Set());
@@ -731,11 +764,16 @@
     }
 
     function readNodeId() {
+      // Handle [*] start/end state syntax (stateDiagram)
+      if (line[pos] === "[" && pos + 2 < len && line[pos + 1] === "*" && line[pos + 2] === "]") {
+        pos += 3;
+        return "[*]";
+      }
       const m = line.slice(pos).match(/^([a-zA-Z_][a-zA-Z0-9_-]*)/);
       if (!m) return null;
       // Exclude mermaid keywords
       const kw = ["flowchart", "graph", "subgraph", "end", "style", "classDef", "class", "click",
-                   "linkStyle", "direction", "TD", "TB", "BT", "RL", "LR"];
+                   "linkStyle", "direction", "TD", "TB", "BT", "RL", "LR", "state"];
       if (kw.includes(m[1])) { pos += m[1].length; return null; }
       pos += m[1].length;
       return m[1];
@@ -799,33 +837,49 @@
   //  SVG ELEMENT MAPPING
   // ═══════════════════════════════════════
 
+  function resolveNodeId(el) {
+    const elId = el.id || "";
+
+    // Pattern 1: prefix-id-number (flowchart-A-0, state-Still-3, etc.)
+    const match = elId.match(/^(?:flowchart|state)-(.+?)-\d+$/);
+    if (match) return match[1];
+
+    // Pattern 2: data-id attribute
+    const dataId = el.getAttribute("data-id");
+    if (dataId) return dataId;
+
+    // Pattern 3: match label text against known parsed node IDs
+    const labelEl = el.querySelector(".nodeLabel");
+    if (labelEl) {
+      const text = labelEl.textContent.trim();
+      if (allParsedNodeIds.has(text)) return text;
+    }
+
+    // Fallback: raw element ID
+    return elId || null;
+  }
+
   function mapSvgElements(svgEl) {
     svgNodeMap = new Map();
     svgEdgeList = [];
     svgEdgeLabelList = [];
     svgLinkList = [];
 
-    // Nodes: mermaid gives them ids like "flowchart-<nodeId>-<n>" or just includes the id in data-id
+    // Nodes: mermaid gives them ids like "flowchart-<nodeId>-<n>" or "state-<nodeId>-<n>"
     const nodeEls = svgEl.querySelectorAll(".node");
     for (const el of nodeEls) {
-      const elId = el.id || "";
-      // Extract node ID from the element id: "flowchart-A-0" -> "A"
-      const match = elId.match(/^flowchart-(.+?)-\d+$/);
-      if (match) {
-        svgNodeMap.set(match[1], el);
-      } else {
-        // Fallback: try data-id attribute or the id itself
-        const dataId = el.getAttribute("data-id");
-        if (dataId) {
-          svgNodeMap.set(dataId, el);
-        } else if (elId) {
-          svgNodeMap.set(elId, el);
-        }
+      const nodeId = resolveNodeId(el);
+      if (nodeId) {
+        svgNodeMap.set(nodeId, el);
       }
     }
 
     // Edge paths and labels (in source order)
+    // Flowcharts use <g class="edgePath">, state diagrams use <path class="transition">
     svgEdgeList = Array.from(svgEl.querySelectorAll(".edgePath"));
+    if (svgEdgeList.length === 0) {
+      svgEdgeList = Array.from(svgEl.querySelectorAll("path.transition"));
+    }
     svgEdgeLabelList = Array.from(svgEl.querySelectorAll(".edgeLabel"));
     svgLinkList = Array.from(svgEl.querySelectorAll(".flowchart-link"));
   }
@@ -867,10 +921,7 @@
   }
 
   function nodeIdFromElement(el) {
-    const elId = el.id || "";
-    const match = elId.match(/^flowchart-(.+?)-\d+$/);
-    if (match) return match[1];
-    return el.getAttribute("data-id") || elId || null;
+    return resolveNodeId(el);
   }
 
   function highlightNode(nodeId) {
@@ -1101,6 +1152,7 @@
   // ═══════════════════════════════════════
 
   document.getElementById("btn-render").addEventListener("click", renderDiagram);
+  layoutSelect.addEventListener("change", () => { if (inputEl.value.trim()) renderDiagram(); });
 
 
   inputEl.addEventListener("keydown", (e) => {
