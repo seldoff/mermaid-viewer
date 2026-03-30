@@ -367,6 +367,31 @@
 
   .spinner-overlay.visible { display: flex; }
 
+  /* ── Drop overlay ── */
+  .drop-overlay {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(37, 99, 235, 0.08);
+    border: 3px dashed var(--accent);
+    z-index: 100;
+    pointer-events: none;
+  }
+
+  .drop-overlay.visible { display: flex; }
+
+  .drop-overlay span {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--surface);
+    padding: 12px 24px;
+    border-radius: 10px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.1);
+  }
+
   .spinner {
     width: 32px;
     height: 32px;
@@ -400,6 +425,7 @@
 </header>
 
 <div class="error-banner" id="error-banner"></div>
+<div class="drop-overlay" id="drop-overlay"><span>Drop file to load diagram</span></div>
 
 <div class="split">
   <div class="editor-pane" id="editor-pane">
@@ -1168,6 +1194,63 @@
       inputEl.value = inputEl.value.substring(0, start) + "  " + inputEl.value.substring(end);
       inputEl.selectionStart = inputEl.selectionEnd = start + 2;
     }
+  });
+
+
+  // ═══════════════════════════════════════
+  //  DRAG & DROP
+  // ═══════════════════════════════════════
+
+  const dropOverlay = document.getElementById("drop-overlay");
+  let dragCounter = 0;
+
+  document.addEventListener("dragenter", (e) => {
+    e.preventDefault();
+    dragCounter++;
+    if (dragCounter === 1) dropOverlay.classList.add("visible");
+  });
+
+  document.addEventListener("dragleave", (e) => {
+    e.preventDefault();
+    dragCounter--;
+    if (dragCounter === 0) dropOverlay.classList.remove("visible");
+  });
+
+  document.addEventListener("dragover", (e) => {
+    e.preventDefault();
+  });
+
+  document.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dragCounter = 0;
+    dropOverlay.classList.remove("visible");
+
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+
+    if (!file.type.startsWith("text/") && file.type !== "" && !file.name.match(/\.(mmd|mermaid|txt|md)$/i)) {
+      errorBanner.textContent = "Only text files are supported.";
+      errorBanner.classList.add("visible");
+      return;
+    }
+
+    if (file.size > 102400) {
+      errorBanner.textContent = "File too large — 100 KB limit.";
+      errorBanner.classList.add("visible");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      inputEl.value = reader.result;
+      // Expand editor if collapsed
+      const editorPane = document.getElementById("editor-pane");
+      if (editorPane.classList.contains("collapsed")) {
+        editorPane.classList.remove("collapsed");
+      }
+      renderDiagram();
+    };
+    reader.readAsText(file);
   });
 
 
