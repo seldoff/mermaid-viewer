@@ -524,6 +524,25 @@
     });
   });
 
+  // ── Load diagram from ?diagramUrl=<url> query param ──
+
+  async function loadFromDiagramUrl() {
+    const params = new URLSearchParams(location.search);
+    const url = params.get("diagramUrl");
+    if (!url) return false;
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const text = await resp.text();
+      inputEl.value = text;
+      return true;
+    } catch (e) {
+      console.error("Failed to load diagram from URL:", e);
+      inputEl.value = `%% Failed to load diagram from:\n%% ${url}\n%% Error: ${e.message}`;
+      return true;
+    }
+  }
+
   const loadedFromHash = loadFromHash();
 
   if (!loadedFromHash && VIEWER_CONFIG.initialDiagram) {
@@ -1250,7 +1269,11 @@
 
 
   // Auto-render on load if there's content
-  if (inputEl.value.trim()) {
+  if (!loadedFromHash) {
+    loadFromDiagramUrl().then(() => {
+      if (inputEl.value.trim()) renderDiagram();
+    });
+  } else if (inputEl.value.trim()) {
     renderDiagram();
   }
 
